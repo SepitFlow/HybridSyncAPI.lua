@@ -1,0 +1,135 @@
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local localPlayer = Players.LocalPlayer
+local endpoint = localPlayer:FindFirstChild("ServerEndpoint", true)
+               or ReplicatedStorage:FindFirstChild("ServerEndpoint", true)
+assert(endpoint, "[HybridSyncAPI] ServerEndpoint not found")
+
+-- 2) Async RPC helper
+local function asyncInvoke(actionName, payload)
+    task.spawn(function()
+        local ok, err = pcall(function()
+            endpoint:InvokeServer(actionName, payload)
+        end)
+        if not ok then
+            warn(string.format("[HybridSyncAPI] InvokeServer failed: %s -- %s", actionName, tostring(err)))
+        end
+    end)
+end
+
+-- 3) Extended Property -> RPC mapping
+local SyncMap = {
+    Size           = "SyncResize",
+    CFrame         = "SyncMove",
+    Color          = "SyncColor",
+    BrickColor     = "SyncColor",
+    Material       = "SyncMaterial",
+    Transparency   = "SyncMaterial",
+    Reflectance    = "SyncMaterial",
+    CanCollide     = "SyncCollision",
+    Anchored       = "SyncAnchor",
+    Shape          = "SyncShape",
+    MeshId         = "SyncMesh",
+    Scale          = "SyncMesh",
+    Texture        = "SyncTexture",
+    Name           = "SetName",
+    Parent         = "SetParent",
+    Remove         = "Remove",
+    CreatePart     = "CreatePart",
+    CreateMeshes   = "CreateMeshes",
+    CreateTextures = "CreateTextures",
+    -- Decorations and lighting remain in map
+    LightType      = "CreateLights",
+    Brightness     = "SyncLighting",
+    DecorationType = "CreateDecorations",
+}
+
+-- 4) Special transforms for non‑1:1 props
+local EditTransform = {
+    Position   = function(v) return "CFrame", CFrame.new(v) end,
+    BrickColor = function(bc) return "Color", bc.Color end,
+}
+
+-- 5) Fluent SyncPart API
+local SyncPart = {}
+SyncPart.__index = SyncPart
+
+-- constructor: create part on server, wrap
+function SyncPart.new(className, cframe, parent)
+    local part = endpoint:InvokeServer("CreatePart", className or "Normal", cframe or CFrame.new(), parent or workspace)
+    return setmetatable({ _part = part }, SyncPart)
+end
+
+-- generic setter
+function SyncPart:set(prop, value)
+    local key, val = prop, value
+    if EditTransform[prop] then
+        key, val = EditTransform[prop](value)
+    end
+    local rpc = SyncMap[key]
+    if not rpc then
+        error(string.format("[HybridSyncAPI] No RPC mapped for '%s'", prop))
+    end
+    local entry = { Part = self._part, [key] = val }
+    if rpc == "SyncResize" and not entry.CFrame then
+        entry.CFrame = self._part.CFrame
+    end
+    asyncInvoke(rpc, { entry })
+    return self
+end
+
+-- convenience methods
+function SyncPart:Move(cf)          return self:set("CFrame", cf) end
+function SyncPart:Resize(sz)        return self:set("Size", sz) end
+function SyncPart:Color(clr)        return self:set("Color", clr) end
+function SyncPart:BrickColor(bc)    return self:set("BrickColor", bc) end
+function SyncPart:SetMaterial(mat)  return self:set("Material", mat) end
+function SyncPart:SetTransparency(t) return self:set("Transparency", t) end
+function SyncPart:SetReflectance(r) return self:set("Reflectance", r) end
+function SyncPart:Anchor(flag)      return self:set("Anchored", flag) end
+function SyncPart:Collision(flag)   return self:set("CanCollide", flag) end
+function SyncPart:SetShape(shape)   return self:set("Shape", shape) end
+function SyncPart:SetName(name)     return self:set("Name", name) end
+function SyncPart:SetParent(p)      return self:set("Parent", p) end
+
+-- mesh & texture
+function SyncPart:AddMesh()         return self:set("CreateMeshes", {{ Part = self._part }}) end
+function SyncPart:SetMesh(id)       return self:set("MeshId", id) end
+function SyncPart:SetScale(scale)   return self:set("Scale", scale) end
+function SyncPart:AddTexture()      return self:set("CreateTextures", {{ Part = self._part, Face = Enum.NormalId.Front, TextureType = "Texture" }}) end
+function SyncPart:SetTexture(id)    return self:set("Texture", id) end
+
+-- decorations
+function SyncPart:AddSmoke()        return self:set("DecorationType", "Smoke") end
+function SyncPart:AddFire()         return self:set("DecorationType", "Fire") end
+function SyncPart:AddSparkles()     return self:set("DecorationType", "Sparkles") end
+
+-- lighting
+function SyncPart:AddSpotLight()    return self:set("LightType", "SpotLight") end
+function SyncPart:AddPointLight()   return self:set("LightType", "PointLight") end
+function SyncPart:AddSurfaceLight() return self:set("LightType", "SurfaceLight") end
+function SyncPart:SetBrightness(b)  return self:set("Brightness", b) end
+
+-- 6) Weld and break joints (special-case signatures)
+function SyncPart:WeldTo(targets)
+    local list = type(targets)=="table" and targets or {targets}
+    task.spawn(function()
+        endpoint:InvokeServer("CreateWelds", list, self._part)
+    end)
+    return self
+end
+
+function SyncPart:BreakJoints(welds)
+    local list = welds or {} -- pass in specific weld instances
+    task.spawn(function()
+        endpoint:InvokeServer("RemoveWelds", list, self._part)
+    end)
+    return self
+end
+
+-- destruction
+function SyncPart:Destroy()
+    asyncInvoke("Remove", { self._part })
+    return self
+end
